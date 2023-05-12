@@ -350,6 +350,8 @@ pub struct ZipFileData {
     pub large_file: bool,
     /// AES mode if applicable
     pub aes_mode: Option<(AesMode, AesVendorVersion)>,
+    /// 
+    pub file_signature: FileHeaderSignature
 }
 
 impl ZipFileData {
@@ -472,6 +474,45 @@ impl AesMode {
     }
 }
 
+/// 文件头
+#[derive(Copy, Clone, Debug)]
+pub struct FileHeaderSignature {
+    /// header sig
+    pub file_header_sig: u32,
+    /// dir_header_sig
+    pub central_dir_header_sig: u32,
+    /// central_dir_end_sig
+    pub central_dir_end_sig: u32,
+}
+
+const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
+const CENTRAL_DIRECTORY_HEADER_SIGNATURE: u32 = 0x02014b50;
+const CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06054b50;
+
+impl FileHeaderSignature {
+    /// 带文件头
+    pub fn new(
+        file_header_sig: u32,
+        central_dir_header_sig: u32,
+        central_dir_end_sig: u32,
+    ) -> FileHeaderSignature {
+        FileHeaderSignature {
+            file_header_sig: file_header_sig,
+            central_dir_header_sig: central_dir_header_sig,
+            central_dir_end_sig: central_dir_end_sig,
+        }
+    }
+
+    /// 默认
+    pub fn new_common() -> FileHeaderSignature {
+        FileHeaderSignature {
+            file_header_sig: LOCAL_FILE_HEADER_SIGNATURE,
+            central_dir_header_sig: CENTRAL_DIRECTORY_HEADER_SIGNATURE,
+            central_dir_end_sig: CENTRAL_DIRECTORY_END_SIGNATURE,
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     #[test]
@@ -508,6 +549,7 @@ mod test {
             external_attributes: 0,
             large_file: false,
             aes_mode: None,
+            file_signature: FileHeaderSignature::new_common()
         };
         assert_eq!(
             data.file_name_sanitized(),

@@ -7,7 +7,9 @@ use crate::cp437::FromCp437;
 use crate::crc32::Crc32Reader;
 use crate::result::{InvalidPassword, ZipError, ZipResult};
 use crate::spec;
-use crate::types::{AesMode, AesVendorVersion, AtomicU64, DateTime, System, ZipFileData};
+use crate::types::{
+    AesMode, AesVendorVersion, AtomicU64, DateTime, FileHeaderSignature, System, ZipFileData,
+};
 use crate::zipcrypto::{ZipCryptoReader, ZipCryptoReaderValid, ZipCryptoValidator};
 use byteorder::{LittleEndian, ReadBytesExt};
 use std::borrow::Cow;
@@ -34,6 +36,7 @@ pub(crate) mod stream;
 
 // Put the struct declaration in a private module to convince rustdoc to display ZipArchive nicely
 pub(crate) mod zip_archive {
+
     /// Extract immutable data from `ZipArchive` to make it cheap to clone
     #[derive(Debug)]
     pub(crate) struct Shared {
@@ -67,6 +70,7 @@ pub(crate) mod zip_archive {
     pub struct ZipArchive<R> {
         pub(super) reader: R,
         pub(super) shared: super::Arc<Shared>,
+        // pub(super) file_header: FileHeaderSignature,
     }
 }
 
@@ -190,7 +194,7 @@ fn find_content<'a>(
     // Parse local header
     reader.seek(io::SeekFrom::Start(data.header_start))?;
     let signature = reader.read_u32::<LittleEndian>()?;
-    if signature != spec::LOCAL_FILE_HEADER_SIGNATURE {
+    if signature != data.file_signature.file_header_sig {
         return Err(ZipError::InvalidArchive("Invalid local file header"));
     }
 
@@ -395,11 +399,17 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         }
     }
 
+    /// new ZipArchive with default sig
+    pub fn new(reader: R) -> ZipResult<ZipArchive<R>> {
+        ZipArchive::new_custom(reader, FileHeaderSignature::new_common())
+    }
+
     /// Read a ZIP archive, collecting the files it contains
     ///
     /// This uses the central directory record of the ZIP file, and ignores local file headers
-    pub fn new(mut reader: R) -> ZipResult<ZipArchive<R>> {
-        let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut reader)?;
+    pub fn new_custom(mut reader: R, file_header: FileHeaderSignature) -> ZipResult<ZipArchive<R>> {
+        let (footer, cde_start_pos) =
+            spec::CentralDirectoryEnd::find_and_parse(&mut reader, file_header)?;
 
         if !footer.record_too_small() && footer.disk_number != footer.disk_with_central_directory {
             return unsupported_zip_error("Support for multi-disk files is not implemented");
@@ -426,7 +436,7 @@ impl<R: Read + io::Seek> ZipArchive<R> {
         }
 
         for _ in 0..number_of_files {
-            let file = central_header_to_zip_file(&mut reader, archive_offset)?;
+            let file = central_header_to_zip_file(&mut reader, archive_offset, file_header)?;
             names_map.insert(file.file_name.clone(), files.len());
             files.push(file);
         }
@@ -438,7 +448,11 @@ impl<R: Read + io::Seek> ZipArchive<R> {
             comment: footer.zip_file_comment,
         });
 
-        Ok(ZipArchive { reader, shared })
+        Ok(ZipArchive {
+            reader,
+            shared,
+            // file_header: file_header,
+        })
     }
     /// Extract a Zip archive into a directory, overwriting files if they
     /// already exist. Paths are sanitized with [`ZipFile::enclosed_name`].
@@ -636,6 +650,11 @@ impl<R: Read + io::Seek> ZipArchive<R> {
     pub fn into_inner(self) -> R {
         self.reader
     }
+
+    /// 获取文件头信息，不解压
+    pub fn read_headers(&self) -> Result<Vec<ZipFileData>,()> {
+        Ok(self.shared.files.clone())
+    } 
 }
 
 fn unsupported_zip_error<T>(detail: &'static str) -> ZipResult<T> {
@@ -646,15 +665,16 @@ fn unsupported_zip_error<T>(detail: &'static str) -> ZipResult<T> {
 pub(crate) fn central_header_to_zip_file<R: Read + io::Seek>(
     reader: &mut R,
     archive_offset: u64,
+    file_header: FileHeaderSignature,
 ) -> ZipResult<ZipFileData> {
     let central_header_start = reader.stream_position()?;
 
     // Parse central header
     let signature = reader.read_u32::<LittleEndian>()?;
-    if signature != spec::CENTRAL_DIRECTORY_HEADER_SIGNATURE {
+    if signature != file_header.central_dir_header_sig {
         Err(ZipError::InvalidArchive("Invalid Central Directory header"))
     } else {
-        central_header_to_zip_file_inner(reader, archive_offset, central_header_start)
+        central_header_to_zip_file_inner(reader, archive_offset, central_header_start, file_header)
     }
 }
 
@@ -663,6 +683,7 @@ fn central_header_to_zip_file_inner<R: Read>(
     reader: &mut R,
     archive_offset: u64,
     central_header_start: u64,
+    file_header: FileHeaderSignature,
 ) -> ZipResult<ZipFileData> {
     let version_made_by = reader.read_u16::<LittleEndian>()?;
     let _version_to_extract = reader.read_u16::<LittleEndian>()?;
@@ -724,6 +745,7 @@ fn central_header_to_zip_file_inner<R: Read>(
         external_attributes: external_file_attributes,
         large_file: false,
         aes_mode: None,
+        file_signature: file_header,
     };
 
     match parse_extra_field(&mut result) {
@@ -1031,12 +1053,15 @@ impl<'a> Drop for ZipFile<'a> {
 /// * `external_attributes`: `unix_mode()`: will return None
 pub fn read_zipfile_from_stream<'a, R: io::Read>(
     reader: &'a mut R,
+    file_header: FileHeaderSignature,
 ) -> ZipResult<Option<ZipFile<'_>>> {
     let signature = reader.read_u32::<LittleEndian>()?;
+    let _file_header_sig = file_header.file_header_sig;
+    let _central_dir_header_sig = file_header.central_dir_header_sig;
 
     match signature {
-        spec::LOCAL_FILE_HEADER_SIGNATURE => (),
-        spec::CENTRAL_DIRECTORY_HEADER_SIGNATURE => return Ok(None),
+        x if x == _file_header_sig => (),
+        x if x == _central_dir_header_sig => return Ok(None),
         _ => return Err(ZipError::InvalidArchive("Invalid local file header")),
     }
 
@@ -1091,6 +1116,7 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
         external_attributes: 0,
         large_file: false,
         aes_mode: None,
+        file_signature: file_header,
     };
 
     match parse_extra_field(&mut result) {
@@ -1131,6 +1157,8 @@ pub fn read_zipfile_from_stream<'a, R: io::Read>(
 
 #[cfg(test)]
 mod test {
+    use crate::types::FileHeaderSignature;
+
     #[test]
     fn invalid_offset() {
         use super::ZipArchive;
@@ -1149,7 +1177,7 @@ mod test {
 
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/invalid_offset2.zip"));
-        let reader = ZipArchive::new(io::Cursor::new(v));
+        let reader = ZipArchive::new(io::Cursor::new(v),);
         assert!(reader.is_err());
     }
 
@@ -1160,7 +1188,8 @@ mod test {
 
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/zip64_demo.zip"));
-        let reader = ZipArchive::new(io::Cursor::new(v)).unwrap();
+        let reader =
+            ZipArchive::new(io::Cursor::new(v)).unwrap();
         assert_eq!(reader.len(), 1);
     }
 
@@ -1171,7 +1200,8 @@ mod test {
 
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/mimetype.zip"));
-        let mut reader = ZipArchive::new(io::Cursor::new(v)).unwrap();
+        let mut reader =
+            ZipArchive::new(io::Cursor::new(v)).unwrap();
         assert_eq!(reader.comment(), b"");
         assert_eq!(reader.by_index(0).unwrap().central_header_start(), 77);
     }
@@ -1185,7 +1215,10 @@ mod test {
         v.extend_from_slice(include_bytes!("../tests/data/mimetype.zip"));
         let mut reader = io::Cursor::new(v);
         loop {
-            if read_zipfile_from_stream(&mut reader).unwrap().is_none() {
+            if read_zipfile_from_stream(&mut reader, FileHeaderSignature::new_common())
+                .unwrap()
+                .is_none()
+            {
                 break;
             }
         }
@@ -1198,7 +1231,8 @@ mod test {
 
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/mimetype.zip"));
-        let mut reader1 = ZipArchive::new(io::Cursor::new(v)).unwrap();
+        let mut reader1 =
+            ZipArchive::new(io::Cursor::new(v)).unwrap();
         let mut reader2 = reader1.clone();
 
         let mut file1 = reader1.by_index(0).unwrap();
@@ -1239,7 +1273,8 @@ mod test {
 
         let mut v = Vec::new();
         v.extend_from_slice(include_bytes!("../tests/data/files_and_dirs.zip"));
-        let mut zip = ZipArchive::new(io::Cursor::new(v)).unwrap();
+        let mut zip =
+            ZipArchive::new(io::Cursor::new(v),).unwrap();
 
         for i in 0..zip.len() {
             let zip_file = zip.by_index(i).unwrap();
@@ -1264,7 +1299,7 @@ mod test {
         v.extend_from_slice(include_bytes!(
             "../tests/data/invalid_cde_number_of_files_allocation_smaller_offset.zip"
         ));
-        let reader = ZipArchive::new(io::Cursor::new(v));
+        let reader = ZipArchive::new(io::Cursor::new(v),);
         assert!(reader.is_err());
     }
 
@@ -1280,7 +1315,7 @@ mod test {
         v.extend_from_slice(include_bytes!(
             "../tests/data/invalid_cde_number_of_files_allocation_greater_offset.zip"
         ));
-        let reader = ZipArchive::new(io::Cursor::new(v));
+        let reader = ZipArchive::new(io::Cursor::new(v), );
         assert!(reader.is_err());
     }
 }

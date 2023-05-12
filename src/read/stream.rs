@@ -2,8 +2,10 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 
+use crate::types::FileHeaderSignature;
+
 use super::{
-    central_header_to_zip_file_inner, read_zipfile_from_stream, spec, ZipError, ZipFile,
+    central_header_to_zip_file_inner, read_zipfile_from_stream,  ZipError, ZipFile,
     ZipFileData, ZipResult,
 };
 
@@ -11,12 +13,12 @@ use byteorder::{LittleEndian, ReadBytesExt};
 
 /// Stream decoder for zip.
 #[derive(Debug)]
-pub struct ZipStreamReader<R>(R);
+pub struct ZipStreamReader<R>(R,FileHeaderSignature);
 
 impl<R> ZipStreamReader<R> {
     /// Create a new ZipStreamReader
-    pub fn new(reader: R) -> Self {
-        Self(reader)
+    pub fn new(reader: R,header: FileHeaderSignature) -> Self {
+        Self(reader,header)
     }
 }
 
@@ -29,10 +31,10 @@ impl<R: Read> ZipStreamReader<R> {
 
         // Parse central header
         let signature = self.0.read_u32::<LittleEndian>()?;
-        if signature != spec::CENTRAL_DIRECTORY_HEADER_SIGNATURE {
+        if signature != self.1.central_dir_header_sig {
             Ok(None)
         } else {
-            central_header_to_zip_file_inner(&mut self.0, archive_offset, central_header_start)
+            central_header_to_zip_file_inner(&mut self.0, archive_offset, central_header_start,self.1)
                 .map(ZipStreamFileMetadata)
                 .map(Some)
         }
@@ -41,7 +43,7 @@ impl<R: Read> ZipStreamReader<R> {
     /// Iteraate over the stream and extract all file and their
     /// metadata.
     pub fn visit<V: ZipStreamVisitor>(mut self, visitor: &mut V) -> ZipResult<()> {
-        while let Some(mut file) = read_zipfile_from_stream(&mut self.0)? {
+        while let Some(mut file) = read_zipfile_from_stream(&mut self.0,self.1)? {
             visitor.visit_file(&mut file)?;
         }
 
@@ -251,7 +253,7 @@ mod test {
     fn invalid_offset() {
         ZipStreamReader::new(io::Cursor::new(include_bytes!(
             "../../tests/data/invalid_offset.zip"
-        )))
+        )),FileHeaderSignature::new_common())
         .visit(&mut DummyVisitor)
         .unwrap_err();
     }
@@ -260,7 +262,7 @@ mod test {
     fn invalid_offset2() {
         ZipStreamReader::new(io::Cursor::new(include_bytes!(
             "../../tests/data/invalid_offset2.zip"
-        )))
+        )),FileHeaderSignature::new_common())
         .visit(&mut DummyVisitor)
         .unwrap_err();
     }
@@ -269,7 +271,7 @@ mod test {
     fn zip_read_streaming() {
         let reader = ZipStreamReader::new(io::Cursor::new(include_bytes!(
             "../../tests/data/mimetype.zip"
-        )));
+        )),FileHeaderSignature::new_common());
 
         #[derive(Default)]
         struct V {
@@ -306,7 +308,7 @@ mod test {
     fn file_and_dir_predicates() {
         let reader = ZipStreamReader::new(io::Cursor::new(include_bytes!(
             "../../tests/data/files_and_dirs.zip"
-        )));
+        )),FileHeaderSignature::new_common());
 
         #[derive(Default)]
         struct V {
@@ -353,7 +355,7 @@ mod test {
     fn invalid_cde_number_of_files_allocation_smaller_offset() {
         ZipStreamReader::new(io::Cursor::new(include_bytes!(
             "../../tests/data/invalid_cde_number_of_files_allocation_smaller_offset.zip"
-        )))
+        )),FileHeaderSignature::new_common())
         .visit(&mut DummyVisitor)
         .unwrap_err();
     }
@@ -365,7 +367,7 @@ mod test {
     fn invalid_cde_number_of_files_allocation_greater_offset() {
         ZipStreamReader::new(io::Cursor::new(include_bytes!(
             "../../tests/data/invalid_cde_number_of_files_allocation_greater_offset.zip"
-        )))
+        )),FileHeaderSignature::new_common())
         .visit(&mut DummyVisitor)
         .unwrap_err();
     }

@@ -1,5 +1,7 @@
 use std::io::{self, Read};
 
+use zip::FileHeaderSignature;
+
 fn main() {
     std::process::exit(real_main());
 }
@@ -10,7 +12,7 @@ fn real_main() -> i32 {
     let mut buf = [0u8; 16];
 
     loop {
-        match zip::read::read_zipfile_from_stream(&mut stdin_handle) {
+        match zip::read::read_zipfile_from_stream(&mut stdin_handle,FileHeaderSignature::new_common()) {
             Ok(Some(mut file)) => {
                 println!(
                     "{}: {} bytes ({} bytes packed)",

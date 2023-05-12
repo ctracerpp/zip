@@ -2,10 +2,11 @@ use crate::result::{ZipError, ZipResult};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::io;
 use std::io::prelude::*;
+use crate::types::FileHeaderSignature;
 
-pub const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
-pub const CENTRAL_DIRECTORY_HEADER_SIGNATURE: u32 = 0x02014b50;
-const CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06054b50;
+//pub const LOCAL_FILE_HEADER_SIGNATURE: u32 = 0x04034b50;
+//pub const CENTRAL_DIRECTORY_HEADER_SIGNATURE: u32 = 0x02014b50;
+//const CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06054b50;
 pub const ZIP64_CENTRAL_DIRECTORY_END_SIGNATURE: u32 = 0x06064b50;
 const ZIP64_CENTRAL_DIRECTORY_END_LOCATOR_SIGNATURE: u32 = 0x07064b50;
 
@@ -20,6 +21,7 @@ pub struct CentralDirectoryEnd {
     pub central_directory_size: u32,
     pub central_directory_offset: u32,
     pub zip_file_comment: Vec<u8>,
+    pub file_header: FileHeaderSignature
 }
 
 impl CentralDirectoryEnd {
@@ -35,9 +37,9 @@ impl CentralDirectoryEnd {
             || self.central_directory_offset == 0xFFFFFFFF
     }
 
-    pub fn parse<T: Read>(reader: &mut T) -> ZipResult<CentralDirectoryEnd> {
+    pub fn parse<T: Read>(reader: &mut T,file_header: FileHeaderSignature) -> ZipResult<CentralDirectoryEnd> {
         let magic = reader.read_u32::<LittleEndian>()?;
-        if magic != CENTRAL_DIRECTORY_END_SIGNATURE {
+        if magic != file_header.central_dir_end_sig {
             return Err(ZipError::InvalidArchive("Invalid digital signature header"));
         }
         let disk_number = reader.read_u16::<LittleEndian>()?;
@@ -58,11 +60,12 @@ impl CentralDirectoryEnd {
             central_directory_size,
             central_directory_offset,
             zip_file_comment,
+            file_header
         })
     }
 
     pub fn find_and_parse<T: Read + io::Seek>(
-        reader: &mut T,
+        reader: &mut T,file_header: FileHeaderSignature
     ) -> ZipResult<(CentralDirectoryEnd, u64)> {
         const HEADER_SIZE: u64 = 22;
         const BYTES_BETWEEN_MAGIC_AND_COMMENT_SIZE: u64 = HEADER_SIZE - 6;
@@ -77,12 +80,12 @@ impl CentralDirectoryEnd {
         let mut pos = file_length - HEADER_SIZE;
         while pos >= search_upper_bound {
             reader.seek(io::SeekFrom::Start(pos))?;
-            if reader.read_u32::<LittleEndian>()? == CENTRAL_DIRECTORY_END_SIGNATURE {
+            if reader.read_u32::<LittleEndian>()? == file_header.central_dir_end_sig {
                 reader.seek(io::SeekFrom::Current(
                     BYTES_BETWEEN_MAGIC_AND_COMMENT_SIZE as i64,
                 ))?;
                 let cde_start_pos = reader.seek(io::SeekFrom::Start(pos))?;
-                return CentralDirectoryEnd::parse(reader).map(|cde| (cde, cde_start_pos));
+                return CentralDirectoryEnd::parse(reader,file_header).map(|cde| (cde, cde_start_pos));
             }
             pos = match pos.checked_sub(1) {
                 Some(p) => p,
@@ -95,7 +98,7 @@ impl CentralDirectoryEnd {
     }
 
     pub fn write<T: Write>(&self, writer: &mut T) -> ZipResult<()> {
-        writer.write_u32::<LittleEndian>(CENTRAL_DIRECTORY_END_SIGNATURE)?;
+        writer.write_u32::<LittleEndian>(self.file_header.central_dir_end_sig)?;
         writer.write_u16::<LittleEndian>(self.disk_number)?;
         writer.write_u16::<LittleEndian>(self.disk_with_central_directory)?;
         writer.write_u16::<LittleEndian>(self.number_of_files_on_this_disk)?;

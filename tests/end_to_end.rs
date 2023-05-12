@@ -69,7 +69,7 @@ fn append() {
         write_test_archive(file, method).expect("Couldn't write to test file");
 
         {
-            let mut zip = zip::ZipWriter::new_append(&mut file).unwrap();
+            let mut zip = zip::ZipWriter::new_append(&mut file,zip::FileHeaderSignature::new_common()).unwrap();
             zip.start_file(
                 COPY_ENTRY_NAME,
                 FileOptions::default().compression_method(method),

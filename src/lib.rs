@@ -28,6 +28,8 @@ pub use crate::compression::{CompressionMethod, SUPPORTED_COMPRESSION_METHODS};
 pub use crate::read::ZipArchive;
 pub use crate::types::DateTime;
 pub use crate::write::ZipWriter;
+pub use crate::types::FileHeaderSignature;
+pub use crate::types::ZipFileData;
 
 #[cfg(feature = "aes-crypto")]
 mod aes;

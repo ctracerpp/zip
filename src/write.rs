@@ -4,7 +4,7 @@ use crate::compression::CompressionMethod;
 use crate::read::{central_header_to_zip_file, ZipArchive, ZipFile};
 use crate::result::{ZipError, ZipResult};
 use crate::spec;
-use crate::types::{AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION};
+use crate::types::{AtomicU64, DateTime, System, ZipFileData, DEFAULT_VERSION, FileHeaderSignature};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
 use std::convert::TryInto;
@@ -101,6 +101,7 @@ pub(crate) mod zip_writer {
         pub(super) writing_to_central_extra_field_only: bool,
         pub(super) writing_raw: bool,
         pub(super) comment: Vec<u8>,
+        pub(super) file_signature: FileHeaderSignature
     }
 }
 pub use zip_writer::ZipWriter;
@@ -280,8 +281,8 @@ impl ZipWriterStats {
 
 impl<A: Read + Write + io::Seek> ZipWriter<A> {
     /// Initializes the archive from an existing ZIP archive, making it ready for append.
-    pub fn new_append(mut readwriter: A) -> ZipResult<ZipWriter<A>> {
-        let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut readwriter)?;
+    pub fn new_append(mut readwriter: A,file_header:FileHeaderSignature) -> ZipResult<ZipWriter<A>> {
+        let (footer, cde_start_pos) = spec::CentralDirectoryEnd::find_and_parse(&mut readwriter,file_header)?;
 
         if footer.disk_number != footer.disk_with_central_directory {
             return Err(ZipError::UnsupportedArchive(
@@ -302,7 +303,7 @@ impl<A: Read + Write + io::Seek> ZipWriter<A> {
         }
 
         let files = (0..number_of_files)
-            .map(|_| central_header_to_zip_file(&mut readwriter, archive_offset))
+            .map(|_| central_header_to_zip_file(&mut readwriter, archive_offset,file_header))
             .collect::<Result<Vec<_>, _>>()?;
 
         let _ = readwriter.seek(io::SeekFrom::Start(directory_start)); // seek directory_start to overwrite it
@@ -316,6 +317,7 @@ impl<A: Read + Write + io::Seek> ZipWriter<A> {
             writing_to_central_extra_field_only: false,
             comment: footer.zip_file_comment,
             writing_raw: true, // avoid recomputing the last file's header
+            file_signature: file_header,
         })
     }
 }
@@ -324,7 +326,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
     /// Initializes the archive.
     ///
     /// Before writing to this object, the [`ZipWriter::start_file`] function should be called.
-    pub fn new(inner: W) -> ZipWriter<W> {
+    pub fn new_custom(inner: W,file_header: FileHeaderSignature) -> ZipWriter<W> {
         ZipWriter {
             inner: GenericZipWriter::Storer(MaybeEncrypted::Unencrypted(inner)),
             files: Vec::new(),
@@ -334,7 +336,13 @@ impl<W: Write + io::Seek> ZipWriter<W> {
             writing_to_central_extra_field_only: false,
             writing_raw: false,
             comment: Vec::new(),
+            file_signature: file_header,
         }
+    }
+
+    /// new default head sig
+    pub fn new(inner: W) -> ZipWriter<W> {
+        ZipWriter::new_custom(inner, FileHeaderSignature::new_common())
     }
 
     /// Set ZIP archive comment.
@@ -397,6 +405,8 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 external_attributes: permissions << 16,
                 large_file: options.large_file,
                 aes_mode: None,
+                file_signature: self.file_signature,
+                
             };
             write_local_file_header(writer, &file)?;
 
@@ -870,6 +880,7 @@ impl<W: Write + io::Seek> ZipWriter<W> {
                 number_of_files,
                 central_directory_size: central_size.min(spec::ZIP64_BYTES_THR) as u32,
                 central_directory_offset: central_start.min(spec::ZIP64_BYTES_THR) as u32,
+                file_header: self.file_signature
             };
 
             footer.write(writer)?;
@@ -1088,7 +1099,7 @@ fn clamp_opt<T: Ord + Copy>(value: T, range: std::ops::RangeInclusive<T>) -> Opt
 
 fn write_local_file_header<T: Write>(writer: &mut T, file: &ZipFileData) -> ZipResult<()> {
     // local file header signature
-    writer.write_u32::<LittleEndian>(spec::LOCAL_FILE_HEADER_SIGNATURE)?;
+    writer.write_u32::<LittleEndian>(file.file_signature.file_header_sig)?;
     // version needed to extract
     writer.write_u16::<LittleEndian>(file.version_needed())?;
     // general purpose bit flag
@@ -1160,7 +1171,7 @@ fn write_central_directory_header<T: Write>(writer: &mut T, file: &ZipFileData) 
         write_central_zip64_extra_field(&mut zip64_extra_field.as_mut(), file)?;
 
     // central file header signature
-    writer.write_u32::<LittleEndian>(spec::CENTRAL_DIRECTORY_HEADER_SIGNATURE)?;
+    writer.write_u32::<LittleEndian>(file.file_signature.central_dir_header_sig)?;
     // version made by
     let version_made_by = (file.system as u16) << 8 | (file.version_made_by as u16);
     writer.write_u16::<LittleEndian>(version_made_by)?;
@@ -1344,8 +1355,8 @@ fn path_to_string(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod test {
     use super::{FileOptions, ZipWriter};
+    use crate::DateTime;
     use crate::compression::CompressionMethod;
-    use crate::types::DateTime;
     use std::io;
     use std::io::Write;
 
